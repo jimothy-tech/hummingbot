@@ -264,20 +264,21 @@ class BootstrapPMM(ScriptStrategyBase):
                     orders_to_replace.append(order)
         return orders_to_replace
 
-    def _replace_missing_order_levels(self, order_levels: List[int]):
+    def _replace_missing_order_levels(self, side: Literal[-1, 1]):
         """
         Replace missing order levels.
         """
-        asyncio.create_task(self.replace_missing_order_levels(order_levels))
+        asyncio.create_task(self.replace_missing_order_levels(side))
 
-    async def replace_missing_order_levels(self, order_levels: List[int]) -> None:
+    async def replace_missing_order_levels(self, side: Literal[-1, 1]) -> None:
         """
         Replace missing orders. We check if we have all orders in the level tracker. If we do, we replace all orders.
         Any orders that are missing will be placed to ensure equal number of buy and sell orders.
         """
-        self.logger().info(f"Replacing missing order levels: {order_levels}")
         async with self.order_replacement_lock:
             try:
+                order_levels = self._order_lvl_tracker.get_missing_order_levels(side)
+                self.logger().info(f"Replacing missing order levels: {order_levels}")
                 for level in order_levels:
                     candidate = self.create_new_candidate(TradeType.BUY if level < 0 else TradeType.SELL, level)
                     adj_candidate = self.adjust_candidate_to_budget(candidate)
@@ -292,13 +293,13 @@ class BootstrapPMM(ScriptStrategyBase):
         Any orders that are missing will be placed ti ensure equal number of buy and sell orders.
         """
         active_orders = self.get_active_orders(connector_name=self.config.exchange)
-        missing_order_levels = self._order_lvl_tracker.get_missing_order_levels(-1) + self._order_lvl_tracker.get_missing_order_levels(1)
 
         # Replace all active orders
         self._replace_orders_with_delay(active_orders)
 
         # Place missing orders
-        self._replace_missing_order_levels(missing_order_levels)
+        self._replace_missing_order_levels(-1)  # Bids
+        self._replace_missing_order_levels(1)  # Asks
 
     def _replace_orders_with_delay(self, proposal: List[LimitOrder]) -> None:
         """
@@ -514,10 +515,10 @@ class BootstrapPMM(ScriptStrategyBase):
             asks_len = len(asks)
 
             if bids_len <= self.parent.config.min_order_levels:
-                self.parent._replace_missing_order_levels(self.get_missing_order_levels(-1))
+                self.parent._replace_missing_order_levels(-1)
 
             if asks_len <= self.parent.config.min_order_levels:
-                self.parent._replace_missing_order_levels(self.get_missing_order_levels(1))
+                self.parent._replace_missing_order_levels(1)
 
         def get_bids_levels(self) -> List[int]:
             """
