@@ -377,7 +377,7 @@ class BootstrapPMM(ScriptStrategyBase):
                 # If there is an issue placing the order, stop placing orders
                 break
             # Delay between orders
-            await asyncio.sleep(self.config.replacement_delay)
+            await asyncio.sleep(self.config.order_placement_delay)
 
     def place_order(self, connector_name: str, order: OrderCandidate) -> bool:
         """
