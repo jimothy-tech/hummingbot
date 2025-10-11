@@ -39,7 +39,7 @@ TIME_IN_FORCE_IOC = "IOC"  # Immediate or cancel
 TIME_IN_FORCE_FOK = "FOK"  # Fill or kill
 
 # WS event types
-ORDER_CHANGE_EVENT_TYPE = "order.spot"
+ORDER_CHANGE_EVENT_TYPE = "orderV2.spot"
 
 
 # Rate Limit Type

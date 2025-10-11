@@ -14,7 +14,7 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_candidate import OrderCandidate
-from hummingbot.core.event.events import OrderFilledEvent
+from hummingbot.core.event.events import BuyOrderCompletedEvent, OrderFilledEvent, SellOrderCompletedEvent
 from hummingbot.logger.email_warning import send_email_critical_issue
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 
@@ -202,6 +202,9 @@ class BootstrapPMM(ScriptStrategyBase):
         orders_to_replace = []
         price_ref = self.connectors[self.config.exchange].get_price_by_type(self.config.trading_pair, self.price_source)
         for order in orders:
+            if order.client_order_id not in self._order_lvl_tracker:
+                self.logger().warning(f"Order {order.client_order_id} not found in level tracker. Skipping evaluation.")
+                continue
             if order.is_buy:
                 if order.price < price_ref * Decimal(1 - self.config.order_spread_tolerance):
                     orders_to_replace.append(order)
@@ -228,23 +231,45 @@ class BootstrapPMM(ScriptStrategyBase):
             # Delay between orders
             await asyncio.sleep(self.config.replacement_delay)
 
-    def replace_order(self, order: LimitOrder | OrderFilledEvent) -> None:
+    def replace_order(self, order: LimitOrder | BuyOrderCompletedEvent | SellOrderCompletedEvent) -> None:
         """
         Replace the order with a new order.
 
         Args:
-            order: LimitOrder | OrderFilledEvent: The order to replace.
+            order: LimitOrder | BuyOrderCompletedEvent | SellOrderCompletedEvent: The order to replace.
         """
-        order_id = order.client_order_id if isinstance(order, LimitOrder) else order.order_id
-        order_side = (TradeType.BUY if order.is_buy else TradeType.SELL) if isinstance(order, LimitOrder) else order.trade_type
-        amount = order.quantity if isinstance(order, LimitOrder) else order.amount
-        trading_pair = order.trading_pair
-        price = order.price
+        if isinstance(order, LimitOrder):
+            order_side = TradeType.BUY if order.is_buy else TradeType.SELL
+            order_id = order.client_order_id
+            amount = order.quantity
+            price = order.price
+        else:  # BuyOrderCompletedEvent or SellOrderCompletedEvent
+            order_side = TradeType.BUY if isinstance(order, BuyOrderCompletedEvent) else TradeType.SELL
+            order_id = order.order_id
+            amount = order.base_asset_amount
+            price = order.quote_asset_amount / order.base_asset_amount
+
+        if order_id not in self._order_lvl_tracker:
+            self.logger().warning(f"Order {order_id} not found in level tracker. Skipping replacement.")
+            return
+
+        if order_side not in [TradeType.BUY, TradeType.SELL]:
+            self.logger().warning(f"Order {order_id} has invalid side. Skipping replacement.")
+            return
+
+        if amount is None or amount == 0:
+            self.logger().warning(f"Order {order_id} has invalid amount. Skipping replacement.")
+            return
+
+        if price is None or price == 0:
+            self.logger().warning(f"Order {order_id} has invalid price. Skipping replacement.")
+            return
+
         level = self._order_lvl_tracker[order_id]
 
         self.logger().info(f"Replacing LimitOrder(id={order_id}, side={order_side}, amount={amount}, price={price})")
         if isinstance(order, LimitOrder):  # Cancel only if the order hasn't been filled
-            self.cancel(self.config.exchange, trading_pair, order_id)
+            self.cancel(self.config.exchange, self.config.trading_pair, order_id)
         # Remove old order from level tracker
         del self._order_lvl_tracker[order_id]
 
@@ -311,11 +336,28 @@ class BootstrapPMM(ScriptStrategyBase):
 
     def did_fill_order(self, event: OrderFilledEvent):
         """
-        Handle the order filled event. This will replace the order.
+        Handle the order filled event.
         """
         msg = (f"{event.trade_type.name} {round(event.amount, 2)} {event.trading_pair} {self.config.exchange} at {round(event.price, 2)}")
         self.log_with_clock(logging.INFO, msg)
         self.notify_hb_app_with_timestamp(msg)
 
-        # replace order
+    def did_complete_buy_order(self, event: BuyOrderCompletedEvent):
+        """
+        Called ONLY when a BUY order is COMPLETELY filled.
+        """
+        msg = f"BUY order COMPLETELY filled: {event.base_asset_amount} {event.base_asset}"
+        self.log_with_clock(logging.INFO, msg)
+        self.notify_hb_app_with_timestamp(msg)
+        # Replace order here - safe now!
+        self.replace_order(event)
+
+    def did_complete_sell_order(self, event: SellOrderCompletedEvent):
+        """
+        Called ONLY when a SELL order is COMPLETELY filled.
+        """
+        msg = f"SELL order COMPLETELY filled: {event.base_asset_amount} {event.base_asset}"
+        self.log_with_clock(logging.INFO, msg)
+        self.notify_hb_app_with_timestamp(msg)
+        # Replace order here - safe now!
         self.replace_order(event)
