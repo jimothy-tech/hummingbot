@@ -264,11 +264,11 @@ class BootstrapPMM(ScriptStrategyBase):
                     orders_to_replace.append(order)
         return orders_to_replace
 
-    def _replace_missing_order_levels(self):
+    def _replace_missing_order_levels(self, order_levels: List[int]):
         """
         Replace missing order levels.
         """
-        asyncio.create_task(self.replace_missing_orders())
+        asyncio.create_task(self.replace_missing_order_levels(order_levels))
 
     async def replace_missing_order_levels(self, order_levels: List[int]) -> None:
         """
@@ -292,7 +292,7 @@ class BootstrapPMM(ScriptStrategyBase):
         Any orders that are missing will be placed ti ensure equal number of buy and sell orders.
         """
         active_orders = self.get_active_orders(connector_name=self.config.exchange)
-        missing_order_levels = self._order_lvl_tracker.get_missing_order_levels()
+        missing_order_levels = self._order_lvl_tracker.get_missing_order_levels(-1) + self._order_lvl_tracker.get_missing_order_levels(1)
 
         # Replace all active orders
         self._replace_orders_with_delay(active_orders)
@@ -501,8 +501,35 @@ class BootstrapPMM(ScriptStrategyBase):
             Remove an order from the level tracker.
             """
             del self[order_id]
-            if len(self) < self.parent.config.min_order_levels:
-                self.parent._replace_missing_order_levels(self.get_missing_order_levels())
+
+            self.replace_missing_order_levels()
+
+        def replace_missing_order_levels(self):
+            """
+            Replace missing order levels.
+            """
+            bids = self.get_bids_levels()
+            asks = self.get_asks_levels()
+            bids_len = len(bids)
+            asks_len = len(asks)
+
+            if bids_len <= self.parent.config.min_order_levels:
+                self.parent._replace_missing_order_levels(self.get_missing_order_levels(-1))
+
+            if asks_len <= self.parent.config.min_order_levels:
+                self.parent._replace_missing_order_levels(self.get_missing_order_levels(1))
+
+        def get_bids_levels(self) -> List[int]:
+            """
+            Get the bids levels.
+            """
+            return list(filter(lambda x: x < 0, self.values()))
+
+        def get_asks_levels(self) -> List[int]:
+            """
+            Get the asks levels.
+            """
+            return list(filter(lambda x: x > 0, self.values()))
 
         def get_order_level(self, order_id: str) -> int:
             """
@@ -510,13 +537,13 @@ class BootstrapPMM(ScriptStrategyBase):
             """
             return self[order_id]
 
-        def get_missing_order_levels(self) -> List[int]:
+        def get_missing_order_levels(self, side: Literal[-1, 1]) -> List[int]:
             """
             Get the missing order levels.
             """
             levels = self.parent.config.levels
             missing_orders = []
-            for level in range(1, levels + 1):
+            for level in range(side, levels * side + side, side):
                 if level not in self.values():
                     missing_orders.append(level)
             return missing_orders
