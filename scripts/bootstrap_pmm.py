@@ -456,11 +456,11 @@ class BootstrapPMM(ScriptStrategyBase):
         else:
             self._order_lvl_tracker.remove_order(event.order_id)
 
-    def on_stop(self):
+    async def on_stop(self):
         """
         Called when the strategy is stopped.
         """
-        super().on_stop()
+        await super().on_stop()
 
         # Record last reference price
         with open("last_ref_price.json", "w") as f:
