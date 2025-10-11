@@ -83,7 +83,7 @@ class BootstrapPMM(ScriptStrategyBase):
             with open("last_ref_price.json", "r") as f:
                 last_ref_price = json.load(f)[self.config.exchange]
             self.logger().info(f"Loaded last reference price: {last_ref_price}")
-            return last_ref_price
+            return Decimal(last_ref_price)
         except Exception as e:
             self.logger().warning(f"Error loading last reference price: {e}")
             return None
@@ -96,7 +96,7 @@ class BootstrapPMM(ScriptStrategyBase):
         self.logger().info(f"Created initial proposal: {proposal}")
         orders_to_place = self.adjust_proposal_to_budget(proposal)
         self.logger().info(f"Adjusted proposal to budget: {orders_to_place}")
-        self.place_orders(orders_to_place)
+        self._place_orders_with_delay(orders_to_place)
         self.logger().info(f"Placed initial orders!")
         self.first_order_placed = True
 
@@ -464,7 +464,7 @@ class BootstrapPMM(ScriptStrategyBase):
 
         # Record last reference price
         with open("last_ref_price.json", "w") as f:
-            json.dump({self.config.exchange: self.last_ref_price}, f)
+            json.dump({self.config.exchange: float(self.last_ref_price)}, f)
 
     class OrderLevelTracker(dict):
         """
