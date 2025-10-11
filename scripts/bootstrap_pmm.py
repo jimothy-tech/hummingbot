@@ -1,11 +1,11 @@
 import asyncio
+import json
 import logging
 import os
 import random
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Literal
 
-import yaml
 from pydantic import Field
 
 from hummingbot.client.config.config_data_types import BaseClientModel
@@ -21,24 +21,27 @@ from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 
 class BootstrapPMMConfig(BaseClientModel):
     script_file_name: str = os.path.basename(__file__)
-    exchange: str = Field("binance_paper_trade")
-    trading_pair: str = Field("ETH-USDT")
-    order_amount: Decimal = Field(0.01)
-    bid_spread: Decimal = Field(0.001)
-    ask_spread: Decimal = Field(0.001)
+    exchange: str = Field("ascend_ex")
+    trading_pair: str = Field("GNEISS-USDT")
+    order_amount: Decimal = Field(5)
+    bid_spread: Decimal = Field(0.005)
+    ask_spread: Decimal = Field(0.005)
     order_evaluation_time: float = Field(15.0)
     force_evaluation_cycle: bool = Field(False)
     price_type: str = Field("mid")
     order_spread_tolerance: Decimal = Field(0.001)
-    levels: int = Field(3)
+    levels: int = Field(3)  # Number of levels to place orders on each side of the market
     randomize_order_amount: bool = Field(False)
-    replace_all_every_increment: bool = Field(False)  # Turn on replace all orders ever n seconds
-    replacement_increment : float = Field(10.0)  # Amount in seconds to have all orders be replaced.
-    replacement_delay : float = Field(1.5)  # Amount of time to wait between replacing each order
-    random_order_floor: Decimal = Field(1)  # in quote currency (USDT)
-    random_order_ceiling: Decimal = Field(2)  # in quote currency (USDT)
+    replace_all_every_interval: bool = Field(False)  # Turn on replace all orders ever n seconds
+    replace_on_fill: bool = Field(False)  # Turn on replace orders on fill - this will immediately replace the order on complete fill
+    replacement_interval : float = Field(10.0)  # Amount in seconds to have all orders be replaced - only matters if replace_all_every_interval is True
+    replacement_delay : float = Field(0.1)  # Amount of time to wait between replacing each order
+    order_placement_delay : float = Field(0.1)  # Amount of time to wait between placing each order
+    random_order_floor: Decimal = Field(5)  # in quote currency (USDT)
+    random_order_ceiling: Decimal = Field(10)  # in quote currency (USDT)
     price_ceiling: Decimal = Field(2.0)
     price_floor: Decimal = Field(0.5)
+    min_order_levels: int = Field(1)  # Minimum number of orders allowed on one side of the market before replacing all orders
 
 
 class BootstrapPMM(ScriptStrategyBase):
@@ -53,7 +56,6 @@ class BootstrapPMM(ScriptStrategyBase):
     """
 
     price_source = PriceType.MidPrice
-    _order_lvl_tracker = {}
 
     @classmethod
     def init_markets(cls, config: BootstrapPMMConfig):
@@ -66,6 +68,25 @@ class BootstrapPMM(ScriptStrategyBase):
         self.logger().info(f"Loaded config: {self.config}")
 
         self.first_order_placed = False
+        self._order_lvl_tracker = self.OrderLevelTracker(self)
+        self.last_ref_price : None | Decimal = self.load_last_ref_price()  # Used to track the last reference price
+
+        # Lock used to prevent multiple order replacements from happening at the same time
+        self.order_replacement_lock = asyncio.Lock()
+
+    def load_last_ref_price(self):
+        """
+        Load the last reference price from the file.
+        """
+        try:
+            self.logger().info(f"Loading last reference price from file")
+            with open("last_ref_price.json", "r") as f:
+                last_ref_price = json.load(f)[self.config.exchange]
+            self.logger().info(f"Loaded last reference price: {last_ref_price}")
+            return last_ref_price
+        except Exception as e:
+            self.logger().warning(f"Error loading last reference price: {e}")
+            return None
 
     def is_order_out_of_desired_price(self, order: LimitOrder) -> bool:
         return order.price < self.config.price_floor or order.price > self.config.price_ceiling
@@ -83,11 +104,11 @@ class BootstrapPMM(ScriptStrategyBase):
         # Create the initial proposal and place the orders
         if not self.first_order_placed:
             self.eval_target_timestamp = self.current_timestamp + self.config.order_evaluation_time
-            self.repl_target_timestamp = self.current_timestamp + self.config.replacement_increment
+            self.repl_target_timestamp = self.current_timestamp + self.config.replacement_interval
             self.place_initial_orders()
 
         # On each tick, we should evaluate the orders and replace the orders if necessary. Do not run if we are replacing all orders every increment unless force_evaluation_cycle is True.
-        if self.eval_target_timestamp <= self.current_timestamp and (self.config.force_evaluation_cycle or not self.config.replace_all_every_increment):
+        if self.eval_target_timestamp <= self.current_timestamp and (self.config.force_evaluation_cycle or not self.config.replace_all_every_interval):
             orders_to_replace : List[LimitOrder] = self.evaluate_orders()
             if orders_to_replace:
                 self.logger().info(f"Replacing {len(orders_to_replace)} orders")
@@ -95,16 +116,12 @@ class BootstrapPMM(ScriptStrategyBase):
                 self._replace_orders_with_delay(orders_to_replace)
             self.eval_target_timestamp =  self.current_timestamp + self.config.order_evaluation_time
 
-        # On each tick, we should check if replacement_increment has passed
-        if self.repl_target_timestamp <= self.current_timestamp and self.config.replace_all_every_increment:
+        # On each tick, we should check if replacement_interval has passed
+        if self.repl_target_timestamp <= self.current_timestamp and self.config.replace_all_every_interval:
             # Replace all orders if so
             self.logger().info("Replacing all orders!")
-            self._replace_orders_with_delay(
-                sorted(self.get_active_orders(  # Sort so buys are ascending and sells are descending by price
-                    connector_name=self.config.exchange
-                ), key=lambda o: o.price if o.is_buy else -o.price)
-            )
-            self.repl_target_timestamp = self.current_timestamp + self.config.replacement_increment
+            self.replace_all_orders()
+            self.repl_target_timestamp = self.current_timestamp + self.config.replacement_interval
 
     def get_order_amount(self) -> Decimal:
         """
@@ -123,14 +140,29 @@ class BootstrapPMM(ScriptStrategyBase):
         Calculate the order price.
         """
         ref_price = self.connectors[self.config.exchange].get_price_by_type(self.config.trading_pair, self.price_source)
+        if ref_price is None or ref_price.is_nan():  # If the price is not available, use the fallback
+            ref_price = self.calculate_mid_price_fallback()
+
+        self.last_ref_price = ref_price
+
         if order_side == TradeType.BUY:
             return ref_price * Decimal(
-                1 - self.config.bid_spread * Decimal(level / self.config.levels)
+                1 + self.config.bid_spread * Decimal(level / self.config.levels)  # Level will be negative for buy orders, so we need to add the spread
             )
         else:  # SELL
             return ref_price * Decimal(
                 1 + self.config.ask_spread * Decimal(level / self.config.levels)
             )
+
+    def calculate_mid_price_fallback(self) -> Decimal:
+        """
+        Calculate the mid price fallback. This is done by getting the average of the price floor and price ceiling
+        or returning the last reference price if it is available.
+        """
+        if self.last_ref_price is not None and not self.last_ref_price.is_nan():
+            return self.last_ref_price
+
+        return Decimal((self.config.price_floor + self.config.price_ceiling) / 2)
 
     def create_initial_proposal(self) -> List[OrderCandidate]:
         """
@@ -139,18 +171,24 @@ class BootstrapPMM(ScriptStrategyBase):
         The price of the orders is calculated based on the config.bid_spread and config.ask_spread attributes.
         Each proceeding level of order is placed at an evenly spaced amounts from the ref_price to the spread price.
         """
-        ref_price = self.connectors[self.config.exchange].get_price_by_type(self.config.trading_pair, self.price_source)
         proposal = []
         for level in range(1, self.config.levels + 1):
-            buy_order = self.create_new_candidate(TradeType.BUY, level)
+            buy_order = self.create_new_candidate(TradeType.BUY, -level)
             sell_order = self.create_new_candidate(TradeType.SELL, level)
             proposal.extend([buy_order, sell_order])
 
         return proposal
 
-    def create_new_candidate(self, order_side: TradeType, level: int) -> OrderCandidate:
+    def create_new_candidate(self, order_side: Literal[TradeType.BUY, TradeType.SELL], level: int) -> OrderCandidate:
         """
-        Create a new order candidate.
+        Create a new order candidate. The candidates level will be added as an attribute to the candidate
+        and propagate to order placement.
+        Args:
+            order_side: Literal[TradeType.BUY, TradeType.SELL]: The side of the order.
+            level: int: The level of the order. A negative level will indicate a buy order and a positive level will indicate a sell order.
+
+        Returns:
+            OrderCandidate: A new order candidate.
         """
         amount = self.get_order_amount()
 
@@ -213,6 +251,41 @@ class BootstrapPMM(ScriptStrategyBase):
                     orders_to_replace.append(order)
         return orders_to_replace
 
+    def _replace_missing_order_levels(self):
+        """
+        Replace missing order levels.
+        """
+        asyncio.create_task(self.replace_missing_orders())
+
+    async def replace_missing_order_levels(self, order_levels: List[int]) -> None:
+        """
+        Replace missing orders. We check if we have all orders in the level tracker. If we do, we replace all orders.
+        Any orders that are missing will be placed to ensure equal number of buy and sell orders.
+        """
+        async with self.order_replacement_lock:
+            try:
+                for level in order_levels:
+                    candidate = self.create_new_candidate(TradeType.BUY if level < 0 else TradeType.SELL, level)
+                    adj_candidate = self.adjust_candidate_to_budget(candidate)
+                    self.place_order(connector_name=self.config.exchange, order=adj_candidate)
+            except Exception as e:
+                self.logger().error(f"Error replacing missing orders: {e}")
+                raise
+
+    def replace_all_orders(self) -> None:
+        """
+        Replace all orders. We check if we have all orders in the level tracker. If we do, we replace all orders.
+        Any orders that are missing will be placed ti ensure equal number of buy and sell orders.
+        """
+        active_orders = self.get_active_orders(connector_name=self.config.exchange)
+        missing_order_levels = self._order_lvl_tracker.get_missing_order_levels()
+
+        # Replace all active orders
+        self._replace_orders_with_delay(active_orders)
+
+        # Place missing orders
+        self._replace_missing_order_levels(missing_order_levels)
+
     def _replace_orders_with_delay(self, proposal: List[LimitOrder]) -> None:
         """
         Replace the orders in the proposal with new orders.
@@ -226,10 +299,14 @@ class BootstrapPMM(ScriptStrategyBase):
         Args:
             proposal: List[LimitOrder]: A list of orders to replace.
         """
-        for order in proposal:
-            self.replace_order(order)
-            # Delay between orders
-            await asyncio.sleep(self.config.replacement_delay)
+        async with self.order_replacement_lock:
+            try:
+                for order in proposal:
+                    self.replace_order(order)
+                    await asyncio.sleep(self.config.replacement_delay)
+            except Exception as e:
+                self.logger().error(f"Error replacing orders: {e}")
+                raise
 
     def replace_order(self, order: LimitOrder | BuyOrderCompletedEvent | SellOrderCompletedEvent) -> None:
         """
@@ -271,13 +348,19 @@ class BootstrapPMM(ScriptStrategyBase):
         if isinstance(order, LimitOrder):  # Cancel only if the order hasn't been filled
             self.cancel(self.config.exchange, self.config.trading_pair, order_id)
         # Remove old order from level tracker
-        del self._order_lvl_tracker[order_id]
+        self._order_lvl_tracker.remove_order(order_id)
 
         candidate = self.create_new_candidate(order_side, level)
         adj_candidate = self.adjust_candidate_to_budget(candidate)
         self.place_order(connector_name=self.config.exchange, order=adj_candidate)
 
-    def place_orders(self, proposal: List[OrderCandidate]) -> None:
+    def _place_orders_with_delay(self, proposal: List[OrderCandidate]) -> None:
+        """
+        Place the orders in the proposal with a delay.
+        """
+        asyncio.create_task(self.place_orders(proposal))
+
+    async def place_orders(self, proposal: List[OrderCandidate]) -> None:
         """
         Place the orders in the proposal. This does not replace the orders, but simply places them.
 
@@ -291,7 +374,10 @@ class BootstrapPMM(ScriptStrategyBase):
 
         for order in proposal:
             if not self.place_order(connector_name=self.config.exchange, order=order):
+                # If there is an issue placing the order, stop placing orders
                 break
+            # Delay between orders
+            await asyncio.sleep(self.config.replacement_delay)
 
     def place_order(self, connector_name: str, order: OrderCandidate) -> bool:
         """
@@ -308,22 +394,25 @@ class BootstrapPMM(ScriptStrategyBase):
             # send_email_critical_issue(
             #     f"Bootstrap PMM - {self.config.exchange} - {self.config.trading_pair} - Out of desired price range",
             #     f"Order is out of desired price range, stopping market making.")
-            HummingbotApplication.main_application().stop()
-            return False
+            # HummingbotApplication.main_application().stop()
+
+            # Set the price to the price floor or price ceiling
+            order.price = self.config.price_floor if order.order_side == TradeType.BUY else self.config.price_ceiling
+            self.logger().info(f"Set order price to {order.price}")
+
         if order.is_zero_order:
             self.logger().warning(f"Order is a zero order. Check balances. Insufficient funds likely.")
-            return False
         elif order.resized:
             self.logger().warning(f"Order has been resized to fit budget. Check balances. Insufficient funds likely.")
 
         if order.order_side == TradeType.SELL:
             order_id = self.sell(connector_name=connector_name, trading_pair=order.trading_pair,
                                  amount=order.amount, order_type=order.order_type, price=order.price)
-            self._order_lvl_tracker[order_id] = order.level
+            self._order_lvl_tracker.add_order(order_id, order.level)
         elif order.order_side == TradeType.BUY:
             order_id = self.buy(connector_name=connector_name, trading_pair=order.trading_pair,
                                 amount=order.amount, order_type=order.order_type, price=order.price)
-            self._order_lvl_tracker[order_id] = order.level
+            self._order_lvl_tracker.add_order(order_id, order.level)
 
         return True
 
@@ -350,7 +439,10 @@ class BootstrapPMM(ScriptStrategyBase):
         self.log_with_clock(logging.INFO, msg)
         self.notify_hb_app_with_timestamp(msg)
         # Replace order here - safe now!
-        self.replace_order(event)
+        if self.config.replace_on_fill:
+            self.replace_order(event)
+        else:
+            self._order_lvl_tracker.remove_order(event.order_id)
 
     def did_complete_sell_order(self, event: SellOrderCompletedEvent):
         """
@@ -359,5 +451,58 @@ class BootstrapPMM(ScriptStrategyBase):
         msg = f"SELL order COMPLETELY filled: {event.base_asset_amount} {event.base_asset}"
         self.log_with_clock(logging.INFO, msg)
         self.notify_hb_app_with_timestamp(msg)
-        # Replace order here - safe now!
-        self.replace_order(event)
+        if self.config.replace_on_fill:
+            self.replace_order(event)
+        else:
+            self._order_lvl_tracker.remove_order(event.order_id)
+
+    def on_stop(self):
+        """
+        Called when the strategy is stopped.
+        """
+        super().on_stop()
+
+        # Record last reference price
+        with open("last_ref_price.json", "w") as f:
+            json.dump({self.config.exchange: self.last_ref_price}, f)
+
+    class OrderLevelTracker(dict):
+        """
+        Track the level of each order. Extends the dict class to add observer pattern functionality to notify
+        the parent class when the number of orders on one side of the market is less than the min_order_levels attribute.
+        """
+
+        def __init__(self, parent):
+            self.parent = parent
+            super().__init__()
+
+        def add_order(self, order_id: str, level: int):
+            """
+            Add an order to the level tracker.
+            """
+            self[order_id] = level
+
+        def remove_order(self, order_id: str):
+            """
+            Remove an order from the level tracker.
+            """
+            del self[order_id]
+            if len(self) < self.parent.config.min_order_levels:
+                self.parent._replace_missing_order_levels(self.get_missing_order_levels())
+
+        def get_order_level(self, order_id: str) -> int:
+            """
+            Get the level of an order.
+            """
+            return self[order_id]
+
+        def get_missing_order_levels(self) -> List[int]:
+            """
+            Get the missing order levels.
+            """
+            levels = self.parent.config.levels
+            missing_orders = []
+            for level in range(1, levels + 1):
+                if level not in self.values():
+                    missing_orders.append(level)
+            return missing_orders
