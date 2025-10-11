@@ -275,6 +275,7 @@ class BootstrapPMM(ScriptStrategyBase):
         Replace missing orders. We check if we have all orders in the level tracker. If we do, we replace all orders.
         Any orders that are missing will be placed to ensure equal number of buy and sell orders.
         """
+        self.logger().info(f"Replacing missing order levels: {order_levels}")
         async with self.order_replacement_lock:
             try:
                 for level in order_levels:

@@ -102,4 +102,4 @@ def send_email_critical_issue(
         "</body>"
         "</html>"
     )
-    return send_deployment_email(subject, body, email_list_file)
+    return send_email(subject, body, email_list_file)
