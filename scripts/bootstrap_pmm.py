@@ -100,9 +100,16 @@ class BootstrapPMM(ScriptStrategyBase):
         self.logger().info(f"Placed initial orders!")
         self.first_order_placed = True
 
+    def get_min_notional_size(self) -> Decimal:
+        """
+        Get the min notional size.
+        """
+        return self.connectors[self.config.exchange].trading_rules.get(self.config.trading_pair).min_notional_size
+
     def on_tick(self):
         # Create the initial proposal and place the orders
         if not self.first_order_placed:
+
             self.eval_target_timestamp = self.current_timestamp + self.config.order_evaluation_time
             self.repl_target_timestamp = self.current_timestamp + self.config.replacement_interval
             self.place_initial_orders()
@@ -130,9 +137,13 @@ class BootstrapPMM(ScriptStrategyBase):
         """
         if self.config.randomize_order_amount:
             ref_price = self.connectors[self.config.exchange].get_price_by_type(self.config.trading_pair, self.price_source)
-            return Decimal(
+            amount = Decimal(
                 random.uniform(float(self.config.random_order_floor), float(self.config.random_order_ceiling)) / float(ref_price)
             )
+            # Ensure the amount is at least the min notional size
+            amount = max(amount, self.get_min_notional_size())
+            return amount
+
         return Decimal(self.config.order_amount)
 
     def calculate_order_price(self, order_side: TradeType, level: int) -> Decimal:
@@ -146,13 +157,15 @@ class BootstrapPMM(ScriptStrategyBase):
         self.last_ref_price = ref_price
 
         if order_side == TradeType.BUY:
-            return ref_price * Decimal(
+            price = ref_price * Decimal(
                 1 + self.config.bid_spread * Decimal(level / self.config.levels)  # Level will be negative for buy orders, so we need to add the spread
             )
         else:  # SELL
-            return ref_price * Decimal(
+            price = ref_price * Decimal(
                 1 + self.config.ask_spread * Decimal(level / self.config.levels)
             )
+
+        return price
 
     def calculate_mid_price_fallback(self) -> Decimal:
         """
