@@ -76,6 +76,8 @@ class AmmArbStrategy(StrategyPyBase):
                     concurrent_orders_submission: bool = True,
                     status_report_interval: float = 900,
                     rate_source: Optional[RateOracle] = RateOracle.get_instance(),
+                    price_floor: Decimal = Decimal("0"),
+                    price_ceiling: Decimal = Decimal("0"),
                     ):
         """
         Assigns strategy parameters, this function must be called directly after init.
@@ -117,6 +119,9 @@ class AmmArbStrategy(StrategyPyBase):
         self._rate_source = rate_source
 
         self._order_id_side_map: Dict[str, ArbProposalSide] = {}
+
+        self._price_floor = price_floor
+        self._price_ceiling = price_ceiling
 
     @property
     def all_markets_ready(self) -> bool:
@@ -220,6 +225,7 @@ class AmmArbStrategy(StrategyPyBase):
             return
         await self.apply_slippage_buffers(profitable_arb_proposals)
         self.apply_budget_constraint(profitable_arb_proposals)
+        self.apply_price_constraints(profitable_arb_proposals)
         await self.execute_arb_proposals(profitable_arb_proposals)
 
     async def apply_slippage_buffers(self, arb_proposals: List[ArbProposal]):
@@ -258,6 +264,20 @@ class AmmArbStrategy(StrategyPyBase):
                     self.logger().info(f"Can't arbitrage, {market.display_name} "
                                        f"{token} balance "
                                        f"({balance}) is below required order amount ({required}).")
+                    continue
+
+    def apply_price_constraints(self, arb_proposals: List[ArbProposal]):
+        """
+        Updates arb_proposals by setting proposal amount to 0 if the order price is not within the price constraints
+        :param arb_proposals: the arbitrage proposal
+        """
+        for arb_proposal in arb_proposals:
+            for arb_side in (arb_proposal.first_side, arb_proposal.second_side):
+                if arb_side.order_price < self._price_floor or arb_side.order_price > self._price_ceiling:
+                    arb_side.amount = s_decimal_zero
+                    self.logger().info(f"{arb_side.order_price} is not within the price constraints: {self._price_floor} - {self._price_ceiling}" +
+                                       f" for {arb_side.market_info.market.display_name}." +
+                                       f" Setting amount to 0.")
                     continue
 
     def prioritize_evm_exchanges(self, arb_proposal: ArbProposal) -> ArbProposal:

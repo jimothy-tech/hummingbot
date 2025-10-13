@@ -148,4 +148,18 @@ amm_arb_config_map = {
         validator=lambda v: validate_decimal(v),
         prompt_on_new=False,
         type_str="decimal"),
+    "price_floor": ConfigVar(
+        key="price_floor",
+        prompt="What is the price floor? >>> ",
+        default=Decimal("0"),
+        validator=lambda v: validate_decimal(v),
+        prompt_on_new=True,
+        type_str="decimal"),
+    "price_ceiling": ConfigVar(
+        key="price_ceiling",
+        prompt="What is the price ceiling? >>> ",
+        default=Decimal("10000000"),
+        validator=lambda v: validate_decimal(v),
+        prompt_on_new=True,
+        type_str="decimal"),
 }
