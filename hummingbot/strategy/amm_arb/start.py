@@ -22,6 +22,8 @@ def start(self):
     quote_conversion_rate = amm_arb_config_map.get("quote_conversion_rate").value
     gas_token = amm_arb_config_map.get("gas_token").value
     gas_price = amm_arb_config_map.get("gas_price").value
+    price_floor = amm_arb_config_map.get("price_floor").value
+    price_ceiling = amm_arb_config_map.get("price_ceiling").value
 
     self.initialize_markets([(connector_1, [market_1]), (connector_2, [market_2])])
     base_1, quote_1 = market_1.split("-")
@@ -61,4 +63,6 @@ def start(self):
                               market_2_slippage_buffer=market_2_slippage_buffer,
                               concurrent_orders_submission=concurrent_orders_submission,
                               rate_source=rate_source,
+                              price_floor=price_floor,
+                              price_ceiling=price_ceiling,
                               )
