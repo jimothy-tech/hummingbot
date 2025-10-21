@@ -1,0 +1,12 @@
+FROM ubuntu:22.04
+
+# System deps (Python 3.10 + headers, compilers, SSL/FFI/zlib)
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    python3.10 python3.10-venv python3-pip python3.10-dev \
+    build-essential git curl ca-certificates pkg-config libffi-dev libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Optional but useful (some libs build with Rust)
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y cargo && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app

@@ -48,9 +48,6 @@ ORDERS = "ORDERS"
 ORDERS_24HR = "ORDERS_24HR"
 RAW_REQUESTS = "RAW_REQUESTS"
 
-# Amount of time to wait while cancelling all orders
-CANCEL_ALL_TIMEOUT = 600
-
 # Rate Limit time intervals
 ONE_MINUTE = 60
 ONE_SECOND = 1

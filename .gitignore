@@ -1,100 +1,83 @@
-# Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio and Webstorm
-# Reference: https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
 
-# .idea
-/.idea
-
+.\#*
+\#*\#
+atlassian-ide-plugin.xml
+*.bak
+/build
+# Cert files
+/certs
+/**/.chain_cookie
+**/.claude/settings.local.json
 # CMake
 cmake-build-debug/
-
-## File-based project format:
-*.iws
-
-## Plugin-specific files:
-
-# IntelliJ
-/out/
-
-# JIRA plugin
-atlassian-ide-plugin.xml
-
-# Crashlytics plugin (for Android Studio and IntelliJ)
 com_crashlytics_export_strings.xml
-crashlytics.properties
+/conf_backup
+/cover/
+.coverage
+# Coverage
+/coverage_html_report/
+coverage.xml
+# Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio and Webstorm
 crashlytics-build.properties
-fabric.properties
-
-__pycache__
-.ipynb_checkpoints
-*.pyc
-
+# Crashlytics plugin (for Android Studio and IntelliJ)
+crashlytics.properties
+*.crt
 # Cython objects
-/**/*.so
-/**/*.pyd
+/data
+# Debug console
+.debug_console_ssh_host_key
+debug.log
+# dev only
+/dist
+# Distribution files
+# Documentation build dir
+/documentation/site/
+**/.DS_Store
+/*.egg-info
+# emacs files
+emails.txt
+.env
+env/
+# External SDK files
+fabric.properties
+## File-based project format:
+.history/
 /hummingbot/**/*.c
-/hummingbot/**/*.cpp
 !/hummingbot/core/cpp/*.cpp
+/hummingbot/**/*.cpp
 /hummingbot/wallet/*.c
 /hummingbot/wallet/*.cpp
 /hummingbot/wallet/ethereum/*.c
 /hummingbot/wallet/ethereum/*.cpp
-/test/**/*.cpp
-/build
-
-# Local files
-**/.DS_Store
-portfolio_value.csv
-/notebooks
-/data
-debug.log
-/installation/docker-commands/hummingbot_files
-
-# Distribution files
-/build
-/dist
-/src
-/*.egg-info
-*.whl
-
-
-# VSCode
-.vscode/
-.history/
-
-# emacs files
-\#*\#
-.\#*
-
-# Documentation build dir
-/documentation/site/
-
-# Cert files
-/certs
-*.pem
-
-# Coverage
-.coverage
-/cover/
-/coverage_html_report/
-coverage.xml
-
-# misc
-*.srl
-*.key
-*.crt
-*.log
-
-# Debug console
-.debug_console_ssh_host_key
-
-/conf_backup
-
-# External SDK files
-/**/.chain_cookie
+# .idea
+/.idea
 /**/.injective_cookie
-
-.env
-
-**/.claude/settings.local.json
-
-emails.txt
+/installation/docker-commands/hummingbot_files
+# IntelliJ
+.ipynb_checkpoints
+*.iws
+# JIRA plugin
+*.key
+# Local files
+# local venv
+*.log
+# misc
+/notebooks
+/out/
+*.pem
+## Plugin-specific files:
+portfolio_value.csv
+*.pyc
+__pycache__
+__pycache__/
+/**/*.pyd
+.pytest_cache/
+# Reference: https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
+/**/*.so
+/src
+*.srl
+/test/**/*.cpp
+.venv/
+.vscode/
+# VSCode
+*.whl
