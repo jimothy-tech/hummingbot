@@ -292,7 +292,9 @@ class BootstrapPMM(ScriptStrategyBase):
         Replace all orders. We check if we have all orders in the level tracker. If we do, we replace all orders.
         Any orders that are missing will be placed ti ensure equal number of buy and sell orders.
         """
-        active_orders = self.get_active_orders(connector_name=self.config.exchange)
+        active_orders = sorted(self.get_active_orders(  # Sort so buys are ascending and sells are descending by price
+                    connector_name=self.config.exchange
+                ), key=lambda o: o.price if o.is_buy else -o.price)
 
         # Replace all active orders
         self._replace_orders_with_delay(active_orders)
