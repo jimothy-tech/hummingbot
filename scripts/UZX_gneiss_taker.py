@@ -21,7 +21,7 @@ class SimpleOrder(ScriptStrategyBase):
     """
 
     # Key Parameters
-    exchange = "ascend_ex"
+    exchange = "uzx"
     base = "GNEISS"
     quote = "USDT"
 

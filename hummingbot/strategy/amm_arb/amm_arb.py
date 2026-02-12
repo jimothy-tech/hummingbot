@@ -58,6 +58,8 @@ class AmmArbStrategy(StrategyPyBase):
     _market_1_quote_eth_rate: None          # XXX (martin_kou): Why are these here?
     _market_2_quote_eth_rate: None          # XXX (martin_kou): Why are these here?
     _rate_source: Optional[RateOracle]
+    _price_floor: Decimal
+    _price_ceiling: Decimal
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -336,6 +338,7 @@ class AmmArbStrategy(StrategyPyBase):
                     if arb_side.is_failed:
                         self.log_with_clock(logging.ERROR,
                                             f"Order {order_id} seems to have failed in this arbitrage opportunity. "
+                                            f"The following error message was recorded: {arb_side.failed_event.error_message}"
                                             f"Dropping Arbitrage Proposal. ")
                         return
 

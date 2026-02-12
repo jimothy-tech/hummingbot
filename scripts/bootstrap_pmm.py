@@ -135,16 +135,21 @@ class BootstrapPMM(ScriptStrategyBase):
         Get the order amount. Uses the configured amount unless the randomize_order_amount attribute is True.
         If it is True, then a random amount between the random_order_floor and random_order_ceiling attributes is returned.
         """
+        amount = 0
         if self.config.randomize_order_amount:
             ref_price = self.connectors[self.config.exchange].get_price_by_type(self.config.trading_pair, self.price_source)
             amount = Decimal(
                 random.uniform(float(self.config.random_order_floor), float(self.config.random_order_ceiling)) / float(ref_price)
             )
-            # Ensure the amount is at least the min notional size
-            amount = max(amount, self.get_min_notional_size())
-            return amount
+        else:
+            amount = self.config.order_amount
 
-        return Decimal(self.config.order_amount)
+        # Ensure the amount is at least the min notional size
+        if amount < self.get_min_notional_size():
+            amount = self.get_min_notional_size()
+            self.logger(f"Amount was figured to be lower than the min notional size. Changed amount to: {amount}.")
+
+        return amount
 
     def calculate_order_price(self, order_side: TradeType, level: int) -> Decimal:
         """
@@ -215,10 +220,13 @@ class BootstrapPMM(ScriptStrategyBase):
         candidate.level = level
         return candidate
 
+    # NOTE: Adjustments can cause the exchange to send back an error due to amount being under the min notional size
+
     def adjust_proposal_to_budget(self, proposal: List[OrderCandidate]) -> List[OrderCandidate]:
         """
         Adjust the proposal to the budget. This is done by calling the budget checker on the connector.
         This adjusts the order amounts to fit the budget if the funds are insufficient.
+
 
         Args:
             proposal: List[OrderCandidate]: A list of orders to adjust.
@@ -243,25 +251,29 @@ class BootstrapPMM(ScriptStrategyBase):
 
     def evaluate_orders(self) -> List[LimitOrder]:
         """
-        Evaluate the current orders to see if the mid price has moved by more than the config.order_spread_tolerance attribute
-        for each order.
-
-        Returns:
-            List[LimitOrder]: A list of orders that are beyond the config.order_spread_tolerance attribute.
+        Evaluate current orders to see if they have drifted beyond the allowed tolerance
+        from their ideal (side- and level-specific) price.
         """
         orders = self.get_active_orders(connector_name=self.config.exchange)
         orders_to_replace = []
-        price_ref = self.connectors[self.config.exchange].get_price_by_type(self.config.trading_pair, self.price_source)
         for order in orders:
             if order.client_order_id not in self._order_lvl_tracker:
                 self.logger().warning(f"Order {order.client_order_id} not found in level tracker. Skipping evaluation.")
                 continue
-            if order.is_buy:
-                if order.price < price_ref * Decimal(1 - self.config.order_spread_tolerance):
-                    orders_to_replace.append(order)
-            else:  # SELL
-                if order.price > price_ref * Decimal(1 + self.config.order_spread_tolerance):
-                    orders_to_replace.append(order)
+
+            level = self._order_lvl_tracker[order.client_order_id]
+            side = TradeType.BUY if order.is_buy else TradeType.SELL
+
+            # Ideal price for this side/level at current reference price
+            target_price = self.calculate_order_price(side, level)
+
+            # Allow tolerance around the ideal price
+            lower = target_price * Decimal(1 - self.config.order_spread_tolerance)
+            upper = target_price * Decimal(1 + self.config.order_spread_tolerance)
+
+            if order.price < lower or order.price > upper:
+                orders_to_replace.append(order)
+
         return orders_to_replace
 
     def _replace_missing_order_levels(self, side: Literal[-1, 1]):
@@ -455,11 +467,15 @@ class BootstrapPMM(ScriptStrategyBase):
         msg = f"BUY order COMPLETELY filled: {event.base_asset_amount} {event.base_asset}"
         self.log_with_clock(logging.INFO, msg)
         self.notify_hb_app_with_timestamp(msg)
-        # Replace order here - safe now!
         if self.config.replace_on_fill:
             self.replace_order(event)
         else:
-            self._order_lvl_tracker.remove_order(event.order_id)
+            try:
+                self._order_lvl_tracker.remove_order(event.order_id)
+            except Exception as e:
+                self.logger().error(f"Error removing buy order {event.order_id} from level tracker: {e}")
+                # Still consider topping up bids
+                self._replace_missing_order_levels(-1)
 
     def did_complete_sell_order(self, event: SellOrderCompletedEvent):
         """
@@ -471,7 +487,11 @@ class BootstrapPMM(ScriptStrategyBase):
         if self.config.replace_on_fill:
             self.replace_order(event)
         else:
-            self._order_lvl_tracker.remove_order(event.order_id)
+            try:
+                self._order_lvl_tracker.remove_order(event.order_id)
+            except Exception as e:
+                self.logger().error(f"Error removing sell order {event.order_id} from level tracker: {e}")
+                self._replace_missing_order_levels(1)
 
     async def on_stop(self):
         """
@@ -503,7 +523,12 @@ class BootstrapPMM(ScriptStrategyBase):
             """
             Remove an order from the level tracker.
             """
-            del self[order_id]
+            level = self.pop(order_id, None)
+
+            if not level:
+                self.parent.logger().warning(
+                    f"Order {order_id} not found in the level tracker. Proceeding with order replacement."
+                )
 
             self.replace_missing_order_levels()
 
@@ -517,9 +542,15 @@ class BootstrapPMM(ScriptStrategyBase):
             asks_len = len(asks)
 
             if bids_len <= self.parent.config.min_order_levels:
+                self.parent.logger().info(
+                    "Bid levels is less than or equal to min.\
+                    Replacing missing bids levels.")
                 self.parent._replace_missing_order_levels(-1)
 
             if asks_len <= self.parent.config.min_order_levels:
+                self.parent.logger().info(
+                    "Ask levels is less than or equal to min.\
+                    Replacing missing asks levels.")
                 self.parent._replace_missing_order_levels(1)
 
         def get_bids_levels(self) -> List[int]:
