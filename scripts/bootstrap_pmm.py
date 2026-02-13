@@ -14,7 +14,12 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_candidate import OrderCandidate
-from hummingbot.core.event.events import BuyOrderCompletedEvent, OrderFilledEvent, SellOrderCompletedEvent
+from hummingbot.core.event.events import (
+    BuyOrderCompletedEvent,
+    OrderCancelledEvent,
+    OrderFilledEvent,
+    SellOrderCompletedEvent,
+)
 from hummingbot.logger.email_warning import send_email_critical_issue
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 
@@ -87,9 +92,6 @@ class BootstrapPMM(ScriptStrategyBase):
         except Exception as e:
             self.logger().warning(f"Error loading last reference price: {e}")
             return None
-
-    def is_order_out_of_desired_price(self, order: LimitOrder) -> bool:
-        return order.price < self.config.price_floor or order.price > self.config.price_ceiling
 
     def place_initial_orders(self):
         proposal = self.create_initial_proposal()
@@ -165,10 +167,18 @@ class BootstrapPMM(ScriptStrategyBase):
             price = ref_price * Decimal(
                 1 + self.config.bid_spread * Decimal(level / self.config.levels)  # Level will be negative for buy orders, so we need to add the spread
             )
+
+            if price < self.config.price_floor:
+                price = self.config.price_floor
+                self.logger().info((f"Price was figured to be lower than the floor - setting to floor {price}"))
         else:  # SELL
             price = ref_price * Decimal(
                 1 + self.config.ask_spread * Decimal(level / self.config.levels)
             )
+
+            if price > self.config.price_ceiling:
+                price = self.config.price_ceiling
+                self.logger().info(f"Price was figured to be higher than the ceiling - setting to ceiling {price}")
 
         return price
 
@@ -328,16 +338,20 @@ class BootstrapPMM(ScriptStrategyBase):
         Args:
             proposal: List[LimitOrder]: A list of orders to replace.
         """
+
+        # Sort proposal with bids ascending and asks descending
+        proposal = sorted(proposal, key=lambda o: o.price if o.is_buy else -o.price)
+
         async with self.order_replacement_lock:
             try:
                 for order in proposal:
-                    self.replace_order(order)
+                    await self.replace_order(order)
                     await asyncio.sleep(self.config.replacement_delay)
             except Exception as e:
                 self.logger().error(f"Error replacing orders: {e}")
                 raise
 
-    def replace_order(self, order: LimitOrder | BuyOrderCompletedEvent | SellOrderCompletedEvent) -> None:
+    async def replace_order(self, order: LimitOrder | BuyOrderCompletedEvent | SellOrderCompletedEvent) -> None:
         """
         Replace the order with a new order.
 
@@ -376,12 +390,57 @@ class BootstrapPMM(ScriptStrategyBase):
         self.logger().info(f"Replacing LimitOrder(id={order_id}, side={order_side}, amount={amount}, price={price})")
         if isinstance(order, LimitOrder):  # Cancel only if the order hasn't been filled
             self.cancel(self.config.exchange, self.config.trading_pair, order_id)
+
+            # Wait until order is officially cancelled
+            await self.await_order_cancellation(order_id)
+
         # Remove old order from level tracker
         self._order_lvl_tracker.remove_order(order_id)
 
         candidate = self.create_new_candidate(order_side, level)
         adj_candidate = self.adjust_candidate_to_budget(candidate)
         self.place_order(connector_name=self.config.exchange, order=adj_candidate)
+
+        # Wait until order is officially placed before moving on to next order
+        await self.await_order_placed(order_id)
+
+    async def await_order_placed(self, order_id: str):
+        """Blocks until the order with order_id is placed"""
+
+        event_occurred = asyncio.Event()
+
+        def handle_event(event):
+            if event.order_id == order_id:
+                event_occurred.set()
+
+        self._event_manager.add_listener(OrderFilledEvent, handle_event)
+
+        try:
+            await event_occurred.wait()
+            self.logger().info(f"Received placement confirmation for order_id={order_id}")
+        except asyncio.TimeoutError as e:
+            self.logger().error(f"Timeout waiting for order placement: {e}")
+        finally:
+            self._event_manager.remove_listener(OrderFilledEvent, handle_event)
+
+    async def await_order_cancellation(self, order_id: str):
+        """Blocks until the order with order_id is cancelled"""
+
+        event_occurred = asyncio.Event()
+
+        def handle_event(event):
+            if event.order_id == order_id:
+                event_occurred.set()
+
+        self._event_manager.add_listener(OrderCancelledEvent, handle_event)
+
+        try:
+            await event_occurred.wait()
+            self.logger().info(f"Received cancellation confirmation for order_id={order_id}")
+        except asyncio.TimeoutError as e:
+            self.logger().error(f"Timeout waiting for cancellation: {e}")
+        finally:
+            self._event_manager.remove_listener(OrderCancelledEvent, handle_event)
 
     def _place_orders_with_delay(self, proposal: List[OrderCandidate]) -> None:
         """
@@ -417,17 +476,6 @@ class BootstrapPMM(ScriptStrategyBase):
             order: OrderCandidate: The order to place.
         """
         self.logger().info(f"Placing order: OrderCandidate(side={order.order_side}, amount={order.amount}, price={order.price})")
-        if self.is_order_out_of_desired_price(order):
-            self.logger().warning(f"Order is out of desired price range, stopping market making.")
-            # TODO: Uncomment this when our smtp server is set up
-            # send_email_critical_issue(
-            #     f"Bootstrap PMM - {self.config.exchange} - {self.config.trading_pair} - Out of desired price range",
-            #     f"Order is out of desired price range, stopping market making.")
-            # HummingbotApplication.main_application().stop()
-
-            # Set the price to the price floor or price ceiling
-            order.price = self.config.price_floor if order.order_side == TradeType.BUY else self.config.price_ceiling
-            self.logger().info(f"Set order price to {order.price}")
 
         if order.is_zero_order:
             self.logger().warning(f"Order is a zero order. Check balances. Insufficient funds likely.")
@@ -468,7 +516,7 @@ class BootstrapPMM(ScriptStrategyBase):
         self.log_with_clock(logging.INFO, msg)
         self.notify_hb_app_with_timestamp(msg)
         if self.config.replace_on_fill:
-            self.replace_order(event)
+            asyncio.create_task(self.replace_order(event))
         else:
             try:
                 self._order_lvl_tracker.remove_order(event.order_id)
@@ -485,7 +533,7 @@ class BootstrapPMM(ScriptStrategyBase):
         self.log_with_clock(logging.INFO, msg)
         self.notify_hb_app_with_timestamp(msg)
         if self.config.replace_on_fill:
-            self.replace_order(event)
+            asyncio.create_task(self.replace_order(event))
         else:
             try:
                 self._order_lvl_tracker.remove_order(event.order_id)
