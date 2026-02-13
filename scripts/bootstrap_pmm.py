@@ -148,14 +148,28 @@ class BootstrapPMM(ScriptStrategyBase):
         return amount
 
     def correct_for_notional(self, amount: Decimal, level_price: Decimal) -> Decimal:
-        """
-        Correct the amount to be used for an order if necessary.
-        """
-        if amount * level_price < self.get_min_notional_size():
-            amount = self.get_min_notional_size() * 1.01 / level_price
-            self.logger(f"Amount was figured to be lower than the min notional size. Changed amount to: {amount}.")
+        connector = self.connectors[self.config.exchange]
 
-        return amount
+        level_price = connector.quantize_order_price(
+            self.config.trading_pair,
+            level_price
+        )
+
+        min_notional = self.get_min_notional_size()
+
+        # Compute exact minimum base needed
+        min_base = min_notional / level_price
+
+        # Add safety margin
+        min_base *= Decimal("1.02")
+
+        # Quantize AFTER computing required base
+        min_base = connector.quantize_order_amount(
+            self.config.trading_pair,
+            min_base
+        )
+
+        return max(amount, min_base)
 
     def calculate_order_price(self, order_side: TradeType, level: int) -> Decimal:
         """
