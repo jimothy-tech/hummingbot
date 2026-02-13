@@ -132,23 +132,27 @@ class BootstrapPMM(ScriptStrategyBase):
             self.replace_all_orders()
             self.repl_target_timestamp = self.current_timestamp + self.config.replacement_interval
 
-    def get_order_amount(self) -> Decimal:
+    def get_order_amount(self, level_price: Decimal) -> Decimal:
         """
         Get the order amount. Uses the configured amount unless the randomize_order_amount attribute is True.
         If it is True, then a random amount between the random_order_floor and random_order_ceiling attributes is returned.
         """
         amount = 0
         if self.config.randomize_order_amount:
-            ref_price = self.connectors[self.config.exchange].get_price_by_type(self.config.trading_pair, self.price_source)
             amount = Decimal(
-                random.uniform(float(self.config.random_order_floor), float(self.config.random_order_ceiling)) / float(ref_price)
+                random.uniform(float(self.config.random_order_floor), float(self.config.random_order_ceiling)) / float(level_price)
             )
         else:
             amount = self.config.order_amount
 
-        # Ensure the amount is at least the min notional size
-        if amount * ref_price < self.get_min_notional_size():
-            amount = self.get_min_notional_size() / ref_price + 1
+        return amount
+
+    def correct_for_notional(self, amount: Decimal, level_price: Decimal) -> Decimal:
+        """
+        Correct the amount to be used for an order if necessary.
+        """
+        if amount * level_price < self.get_min_notional_size():
+            amount = self.get_min_notional_size() * 1.01 / level_price
             self.logger(f"Amount was figured to be lower than the min notional size. Changed amount to: {amount}.")
 
         return amount
@@ -218,15 +222,15 @@ class BootstrapPMM(ScriptStrategyBase):
         Returns:
             OrderCandidate: A new order candidate.
         """
-        amount = self.get_order_amount()
-
-        if order_side == TradeType.BUY:
-            price = self.calculate_order_price(TradeType.BUY, level)
-        else:  # SELL
-            price = self.calculate_order_price(TradeType.SELL, level)
+        level_price = self.calculate_order_price(
+            TradeType.BUY if level < 0 else TradeType.SELL,
+            level
+        )
+        amount = self.get_order_amount(level_price)
+        amount = self.correct_for_notional(amount, level_price)
 
         candidate = OrderCandidate(trading_pair=self.config.trading_pair, is_maker=True, order_type=OrderType.LIMIT,
-                                   order_side=order_side, amount=amount, price=price)
+                                   order_side=order_side, amount=amount, price=level_price)
         candidate.level = level
         return candidate
 
