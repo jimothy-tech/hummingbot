@@ -147,8 +147,8 @@ class BootstrapPMM(ScriptStrategyBase):
             amount = self.config.order_amount
 
         # Ensure the amount is at least the min notional size
-        if amount < self.get_min_notional_size():
-            amount = self.get_min_notional_size()
+        if amount * ref_price < self.get_min_notional_size():
+            amount = self.get_min_notional_size() / ref_price + 1
             self.logger(f"Amount was figured to be lower than the min notional size. Changed amount to: {amount}.")
 
         return amount
