@@ -161,13 +161,21 @@ class BootstrapPMM(ScriptStrategyBase):
         min_base = min_notional / level_price
 
         # Add safety margin
-        min_base *= Decimal("1.02")
+        min_base *= Decimal("1.15")
 
         # Quantize AFTER computing required base
         min_base = connector.quantize_order_amount(
             self.config.trading_pair,
             min_base
         )
+
+        amount = connector.quantize_order_amount(
+            self.config.trading_pair,
+            amount
+        )
+
+        if amount < min_base:
+            self.logger().info(f"Corrected to be above min notional size. Size is now: {min_base}")
 
         return max(amount, min_base)
 
